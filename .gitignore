@@ -1,0 +1,40 @@
+# Swap
+[._]*.s[a-v][a-z]
+[._]*.sw[a-p]
+[._]s[a-rt-v][a-z]
+[._]ss[a-gi-z]
+[._]sw[a-p]
+
+# Session
+Session.vim
+Sessionx.vim
+
+# Temporary
+.netrwhist
+*~
+# Auto-generated tag files
+tags
+
+# Persistent undo
+[._]*.un~
+
+# MacOs DS_Store
+*.DS_Store
+
+# Prowler output
+output/
+
+# Prowler found secrets
+secrets-*/
+
+# JUnit Reports
+junit-reports/
+
+# VSCode files
+.vscode/
+
+terraform-kickstarter/.terraform.lock.hcl
+
+terraform-kickstarter/.terraform/providers/registry.terraform.io/hashicorp/aws/3.56.0/darwin_amd64/terraform-provider-aws_v3.56.0_x5
+
+terraform-kickstarter/terraform.tfstate

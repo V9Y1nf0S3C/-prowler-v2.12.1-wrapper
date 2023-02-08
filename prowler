@@ -1,0 +1,371 @@
+#!/usr/bin/env bash
+
+# Copyright 2018 Toni de la Fuente
+
+# Prowler is a tool that provides automate auditing and hardening guidance of an
+# AWS account. It is based on AWS-CLI commands. It follows some guidelines
+# present in the CIS Amazon Web Services Foundations Benchmark at:
+# https://d0.awsstatic.com/whitepapers/compliance/AWS_CIS_Foundations_Benchmark.pdf
+
+# Contact the author at https://blyx.com/contact
+# and open issues or ask questions at https://github.com/prowler-cloud/prowler
+
+# Code is licensed as Apache License 2.0 as specified in
+# each file. You may obtain a copy of the License at
+# http://www.apache.org/licenses/LICENSE-2.0
+
+# Prowler - Iron Maiden
+#
+# Walking through the city, looking oh so pretty
+# I've just got to find my way
+# See the ladies flashing
+# All there legs and lashes
+# I've just got to find my way...
+
+# Set the defaults variables
+PROWLER_VERSION=2.12.1-19December2022
+PROWLER_DIR=$(dirname "$0")
+
+############################################################
+# DEPENDENCIES
+. "${PROWLER_DIR}"/include/default_variables
+. "${PROWLER_DIR}"/include/colors
+. "${PROWLER_DIR}"/include/os_detector
+. "${PROWLER_DIR}"/include/aws_profile_loader
+. "${PROWLER_DIR}"/include/awscli_detector
+. "${PROWLER_DIR}"/include/whoami
+. "${PROWLER_DIR}"/include/assume_role
+. "${PROWLER_DIR}"/include/csv_header
+. "${PROWLER_DIR}"/include/banner
+. "${PROWLER_DIR}"/include/html_report
+. "${PROWLER_DIR}"/include/tools_detector
+. "${PROWLER_DIR}"/include/outputs_bucket
+. "${PROWLER_DIR}"/include/outputs
+. "${PROWLER_DIR}"/include/credentials_report
+. "${PROWLER_DIR}"/include/scoring
+. "${PROWLER_DIR}"/include/secrets_detector
+. "${PROWLER_DIR}"/include/check_creds_last_used
+. "${PROWLER_DIR}"/include/check3x
+. "${PROWLER_DIR}"/include/connection_tests
+. "${PROWLER_DIR}"/include/securityhub_integration
+. "${PROWLER_DIR}"/include/junit_integration
+. "${PROWLER_DIR}"/include/organizations_metadata
+. "${PROWLER_DIR}"/include/custom_checks
+. "${PROWLER_DIR}"/include/allowlist
+. "${PROWLER_DIR}"/include/db_connector
+. "${PROWLER_DIR}"/include/show_titles
+. "${PROWLER_DIR}"/include/loader
+. "${PROWLER_DIR}"/include/execute_check
+. "${PROWLER_DIR}"/include/validate_options
+. "${PROWLER_DIR}"/include/traps
+. "${PROWLER_DIR}"/include/quick_inventory
+############################################################
+
+# Check external tools
+jq_detector
+curl_detector
+
+############################################################
+# USAGE
+usage(){
+  echo "
+USAGE:
+      $(basename "${0}") [ -p <profile> -r <region>  -h ]
+  Options:
+      -p <profile>        Specify your AWS profile to use.
+                            (i.e.: default)
+      -r <region>         Specify an AWS region to direct API requests to.
+                            (i.e.: us-east-1), all regions are checked anyway if the check requires it.
+      -c <check_id>       Specify one or multiple check ids separated by commas, to see all available checks use \"-l\" option.
+                            (i.e.: \"check11\" for check 1.1 or \"extra71,extra72\" for extra check 71 and extra check 72)
+      -C                  Checklist file. See checklist.txt for reference and format.
+                            (i.e.: checklist.txt)
+      -g <group_id>       Specify a group of checks by id, to see all available group of checks use \"-L\".
+                            (i.e.: \"group3\" for entire section 3, \"cislevel1\" for CIS Level 1 Profile Definitions or \"forensics-ready\")
+      -f <filterregion>   Specify an AWS region to run checks against.
+                            (i.e.: us-west-1 or for multiple regions use single quote like 'us-west-1 us-west-2')
+      -m <maxitems>       Specify the maximum number of items to return for long-running requests (default: 100).
+      -M <mode>           Output or report mode: text (default), mono, html, json, json-asff, junit-xml, csv. They can be used combined comma separated.
+                            (i.e.: \"html,json\"; files created in background; progress on stdout)
+      -k                  Keep the credential report for debugging.
+      -n                  Show check numbers to sort easier.
+                            (i.e.: 1.01 instead of 1.1)
+      -l                  List all available checks only (does not perform any check). Add -g <group_id> to only list checks within the specified group.
+      -L                  List all groups (does not perform any check).
+      -e                  Exclude group extras.
+      -E                  Execute all tests except a list of specified checks separated by comma.
+                            (i.e. check21,check31)
+      -b                  Do not print Prowler banner.
+      -s                  Show scoring report (it is included by default in the html report).
+      -S                  Send check output to AWS Security Hub. Only valid when the output mode is json-asff
+                            (i.e. \"-M json-asff -S\").
+      -x                  Specify external directory with custom checks. S3 URI is supported.
+                            (i.e. /my/own/checks or s3://bucket/prefix/checks, files must start by \"check\").
+      -q                  Get only FAIL findings, will show WARNINGS when a resource is excluded.
+      -A                  Account id for the account where to assume a role, requires -R.
+                            (i.e.: 123456789012)
+      -R                  Role name or role arn to assume in the account, requires -A.
+                            (i.e.: ProwlerRole)
+      -T                  Session duration given to that role credentials in seconds, default 1h (3600) recommended 12h, optional with -R and -A.
+                            (i.e.: 43200)
+      -I                  External ID to be used when assuming roles (not mandatory), requires -A and -R.
+      -w                  Allowlist file. See allowlist_sample.txt for reference and format. S3 URI and DynamoDB table ARNs are also supported as allowlist file.
+                            (i.e.: allowlist_sample.txt or s3://bucket/prefix/allowlist_sample.txt or arn:aws:dynamodb:us-east-1:111111222222:table/allowlist)
+      -N <shodan_api_key> Shodan API key used by check extra7102.
+      -o                  Custom output directory, if not specified will use default prowler/output, requires -M <mode>.
+                            (i.e.: -M csv -o /tmp/reports/)
+      -B                  Custom output bucket, requires -M <mode> and it can work also with -o flag.
+                            (i.e.: -M csv -B my-bucket or -M csv -B my-bucket/folder/)
+      -D                  Same as -B but do not use the assumed role credentials to put objects to the bucket, instead uses the initial credentials.
+      -F                  Custom output report name, if not specified will use default output/prowler-output-ACCOUNT_NUM-OUTPUT_DATE.format.
+      -z                  Failed checks do not trigger exit code 3.
+      -Z                  Specify one or multiple check ids separated by commas that will trigger exit code 3 if they fail. Unspecified checks will not trigger exit code 3. This will override \"-z\".
+                            (i.e.: \"-Z check11,check12\" will cause check11 and/or check12 to trigger exit code 3)
+      -O <mgmnt acct ID>  Specify AWS Organizations management account ID. Used to get account details, requires -R.
+                            (requires organizations:ListAccounts* and organizations:ListTagsForResource)
+      -a <aws_cli_cmd>    Build your own on-the-fly custom check by specifying the AWS CLI command to execute. Requires \"-c extra9999\". Omit the \"aws\" command and only use its parameters within quotes.
+                          Do not nest quotes in the aws parameter. Note that --output text is already included in the check.
+                            i,e. -a 'ec2 describe-security-groups --filters Name=ip-permission.to-port,Values=80 --query SecurityGroups[*].GroupId[]]'
+      -V                  Show version number & exit.
+      -h                  This help.
+      -d <provider>       Send output to database through database connectors supported, currently only PostgreSQL. Prowler will get the credentials and table name from your ~/.pgpass file.
+      -i                  Run Prowler Quick Inventory. The inventory will be stored in an output csv by default.
+      -u <audit_id>       Add audit_id field to use with postgres connector.
+  "
+  exit
+}
+
+############################################################
+# This function comes from include/awscli_detector
+set_aws_default_output
+
+# Parse Prowler command line options
+while getopts ":hlLkqp:r:c:C:g:f:m:M:E:x:enbVsSI:A:R:T:w:N:o:B:D:F:zZ:O:a:d:iu:" OPTION; do
+   case $OPTION in
+     h )
+        usage
+        EXITCODE=1
+        exit $EXITCODE
+        ;;
+     l )
+        LIST_CHECKS=1
+        ;;
+     L )
+        LIST_GROUPS=1
+        ;;
+     k )
+        KEEPCREDREPORT=1
+        ;;
+     p )
+        PROFILE=$OPTARG
+        AWS_PROFILE=$OPTARG
+        ;;
+     r )
+        REGION_OPT=$OPTARG
+        ;;
+     c )
+        CHECK_ID=$OPTARG
+        ;;
+     C )
+        CHECK_FILE=$OPTARG
+        ;;
+     g )
+        GROUP_ID_READ=$OPTARG
+        ;;
+     f )
+        FILTERREGION=$OPTARG
+        ;;
+     m )
+        export MAXITEMS=$OPTARG
+        ;;
+     M )
+        MODE=$OPTARG
+        ;;
+     n )
+        NUMERAL=1
+        ;;
+     b )
+        BANNER=0
+        ;;
+     e )
+        EXTRAS=1
+        ;;
+     E )
+        EXCLUDE_CHECK_ID=$OPTARG
+        ;;
+     V )
+        echo "Prowler $PROWLER_VERSION"
+        EXITCODE=0
+        exit $EXITCODE
+        ;;
+     s )
+        SCORING=1
+        ;;
+     S )
+        SEND_TO_SECURITY_HUB=1
+        ;;
+     x )
+        EXTERNAL_CHECKS_PATH=$OPTARG
+        ;;
+     q )
+        QUIET=1
+        ;;
+     A )
+        ACCOUNT_TO_ASSUME=$OPTARG
+        ;;
+     R )
+        ROLE_TO_ASSUME=$OPTARG
+        ;;
+     I )
+        ROLE_EXTERNAL_ID=$OPTARG
+        ;;
+     T )
+        SESSION_DURATION_TO_ASSUME=$OPTARG
+        ;;
+     w )
+        ALLOWLIST_FILE=$OPTARG
+        ;;
+     N )
+        export SHODAN_API_KEY=$OPTARG
+        ;;
+     o )
+        OUTPUT_DIR_CUSTOM=$OPTARG
+        ;;
+     B )
+        OUTPUT_BUCKET=$OPTARG
+        ;;
+     D )
+        OUTPUT_BUCKET=$OPTARG
+        OUTPUT_BUCKET_NOASSUME=1
+        ;;
+     F )
+        OUTPUT_FILE_NAME=$OPTARG
+        ;;
+     z )
+        FAILED_CHECK_FAILED_SCAN=0
+        ;;
+     Z )
+        FAILED_CHECK_FAILED_SCAN_LIST=$OPTARG
+        ;;
+     O )
+        MANAGEMENT_ACCOUNT_ID=$OPTARG
+        ;;
+     a )
+        export CUSTOM_CMD=$OPTARG
+        ;;
+     d )
+        DATABASE_PROVIDER=$OPTARG
+        ;;
+     i )
+        QUICK_INVENTORY=1
+        ;;
+     u )
+        AUDIT_ID=$OPTARG
+        ;;
+     : )
+        echo ""
+        echo "$OPTRED ERROR!$OPTNORMAL  -$OPTARG requires an argument"
+        usage
+        EXITCODE=1
+        exit $EXITCODE
+        ;;
+     ? )
+        echo ""
+        echo "$OPTRED ERROR!$OPTNORMAL Invalid option"
+        usage
+        EXITCODE=1
+        exit $EXITCODE
+        ;;
+   esac
+done
+############################################################
+# PROWLER MAIN
+
+# Set Prowler Colors
+set_colors
+
+# Show Prowler Banner
+prowlerBanner
+
+# Load Prowler Groups
+load_groups
+# Load Prowler Checks
+get_checks
+
+# Clean up any temp files when prowler quits unexpectedly
+trap clean_up EXIT
+# Clean up and exit if Ctrl-C occurs. Required to allow Ctrl-C to stop Prowler when running in Docker
+trap handle_ctrl_c INT
+
+# Environment variable takes precedence over command line
+unset AWS_DEFAULT_OUTPUT
+
+# Check OS
+os_detector
+TIMESTAMP=$(get_iso8601_timestamp)
+
+# Validate command line options that not requires AWS
+validate_list_checks
+validate_list_groups
+validate_database
+validate_modes
+validate_output_bucket
+
+# Check AWS CLI
+aws_cli_detector
+# load AWS profile
+aws_profile_loader
+
+# Gather account data / test aws cli connectivity
+get_caller_identity
+print_whoami
+
+validate_allowlist
+
+validate_organizations
+# Check Assume Role
+validate_assume_role
+
+# List regions
+get_regions
+
+# Validate command line options that requires AWS
+validate_custom_output_directory
+validate_custom_output_filename
+validate_security_hub
+validate_custom_checks
+
+# Add headers to certain output files
+output_files_init
+validate_junit_output
+
+# run quick inventory logic
+if [[ $QUICK_INVENTORY ]];then
+    quick_inventory
+    exit
+fi
+
+# Execute checks
+for CHECK in "${TOTAL_CHECKS[@]}"
+do
+  echo  >> ./prowler_wrapper_output.txt
+  echo  >> ./prowler_wrapper_output.txt
+  echo  ----------------------------------------------------------- >> ./prowler_wrapper_output.txt
+  echo "_________ PROWLER CHECK: ${CHECK}" >> ./prowler_wrapper_output.txt
+  echo "_________ PROWLER TIME:  $(date)" >> ./prowler_wrapper_output.txt
+  execute_check "${CHECK}"
+  echo  +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++ >> ./prowler_wrapper_output.txt
+done
+
+# Add bottom to certain output files
+output_files_end
+
+# Validate output bucket without assuming role
+validate_copy_to_s3_no_assume
+# Copy Prowler Findings to S3 if required
+copy_to_s3_assume
+
+# Score if required
+scoring
+
+exit $EXITCODE

@@ -1,0 +1,481 @@
+#!/usr/bin/env bash
+
+# Prowler - the handy cloud security tool (copyright 2018) by Toni de la Fuente
+#
+# Licensed under the Apache License, Version 2.0 (the "License"); you may not
+# use this file except in compliance with the License. You may obtain a copy
+# of the License at http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software distributed
+# under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
+# CONDITIONS OF ANY KIND, either express or implied. See the License for the
+# specific language governing permissions and limitations under the License.
+
+# Available parameters for outputs formats (implemented this in CSV from v2.4):
+
+# Output format
+# $PROFILE profile used to run Prowler (--profile in AWS CLI)
+# $ACCOUNT_NUM AWS Account ID
+# $REGION_FROM_CHECK AWS region scanned
+# $TITLE_ID Numeric identifier of each check (1.2, 2.3, etc), originally based on CIS checks.
+# $CHECK_RESULT values can be PASS, FAIL, INFO or WARNING if allowlisted
+# $ITEM_SCORED corresponds to CHECK_SCORED, values can be Scored/Not Scored. This is CIS only, will be deprecated in Prowler.
+# $ITEM_CIS_LEVEL corresponds to CHECK_TYPE_ currently only for CIS Level 1, CIS Level 2 and Extras (all checks not part of CIS)
+# $TITLE_TEXT corresponds to CHECK_TITLE_ shows title of each check
+# $CHECK_RESULT_EXTENDED shows response of each check per resource like sg-123438 is open!
+# $CHECK_ASFF_COMPLIANCE_TYPE specify type from taxonomy https://docs.aws.amazon.com/securityhub/latest/userguide/securityhub-findings-format-type-taxonomy.html
+# $CHECK_SEVERITY severity Low, Medium, High, Critical
+# $CHECK_SERVICENAME AWS service name short name
+# $CHECK_ASFF_RESOURCE_TYPE values from https://docs.aws.amazon.com/securityhub/latest/userguide/securityhub-findings-format.html#asff-resources
+# $CHECK_ASFF_TYPE generic type from taxonomy here  https://docs.aws.amazon.com/securityhub/latest/userguide/securityhub-findings-format-type-taxonomy.html
+# $CHECK_RISK text about risk
+# $CHECK_REMEDIATION text about remediation
+# $CHECK_DOC link to related documentation
+# $CHECK_CAF_EPIC it can be Logging and Monitoring, IAM, Data Protection, Infrastructure Security. Incident Response is not included since CAF has not specific checks on it logs enablement are part of Logging and Monitoring.
+# $ACCOUNT_DETAILS_EMAIL
+# $ACCOUNT_DETAILS_NAME
+# $ACCOUNT_DETAILS_ARN
+# $ACCOUNT_DETAILS_ORG
+# $ACCOUNT_DETAILS_TAGS
+
+EXTENSION_CSV="csv"
+EXTENSION_JSON="json"
+EXTENSION_ASFF="asff.json"
+EXTENSION_TEXT="txt"
+EXTENSION_HTML="html"
+HTML_LOGO_URL="https://github.com/prowler-cloud/prowler/"
+HTML_LOGO_IMG="https://github.com/prowler-cloud/prowler/raw/master/util/html/prowler-logo-new.png"
+PROWLER_PARAMETERS=$@
+
+
+# Set exitcode for codebuild/jenkins-like integrations
+set_exitcode () {
+  if [ "${FAILED_CHECK_FAILED_SCAN}" == 1 ] && [ -z "${FAILED_CHECK_FAILED_SCAN_LIST}" ]
+  then
+      EXITCODE=3
+      export EXITCODE
+  fi
+  if [[ "${FAILED_CHECK_FAILED_SCAN_LIST}" =~ ${CHECK_NAME} ]]
+  then
+      EXITCODE=3
+      export EXITCODE
+  fi
+}
+
+# Add header to certain output files readed from mode
+output_files_init() {
+  OIFS="${IFS}"
+  IFS=','
+  for MODE_TYPE in ${MODE}
+  do
+    if  [ "${MODE_TYPE}" == 'html' ]
+    then
+        addHtmlHeader
+        HTML_REPORT_INIT="1"
+        export HTML_REPORT_INIT
+    fi
+    if [ "${MODE_TYPE}" == 'csv' ]
+    then
+        printCsvHeader
+    fi
+  done
+  IFS="${OIFS}"
+}
+
+# Close HTML output file
+output_files_end() {
+  if [[ "${MODE}" =~ "html" ]]; then
+    addHtmlFooter >> "${OUTPUT_FILE_NAME}.${EXTENSION_HTML}"
+  fi
+}
+
+# Check if resource checked is allowlisted
+allowlist_check() {
+  # Checked value is the whole log message that comes as argument
+  CHECKED_VALUE=${1}
+  # Default value of result is Fail
+  CHECK_RESULT='FAIL'
+  ## ignore allowlists for current check
+  while read -r excluded_item; do
+    # IGNORE_CHECK_NAME is the check with resources allowlisted
+    # RESOURCE_VALUE is what it comes after 'CHECK_NAME:'
+    IGNORE_CHECK_NAME=$(awk -F ":" '{print $1}' <<< "${excluded_item}")
+    RESOURCE_VALUE=$(awk -F "${CHECK_NAME}:" '{print $2}' <<< "${excluded_item}")
+    if [[ "${IGNORE_CHECK_NAME}" == "${CHECK_NAME}" ]]
+    then
+      if [[ "${CHECKED_VALUE}" =~ ${RESOURCE_VALUE} ]]
+      then
+          CHECK_RESULT="WARNING"
+          break
+      fi
+    fi
+
+  done <<< "$IGNORES"
+  echo "${CHECK_RESULT}"
+}
+
+is_quiet() {
+  IS_QUIET="${1}"
+  if [ "${IS_QUIET}" -eq 1 ]
+  then
+      return 0
+  else
+      return 1
+  fi
+}
+
+general_output() {
+  CHECK_RESULT="${1}"
+  CHECK_RESULT_EXTENDED="${2}"
+  CHECK_RESOURCE_ID="${3}"
+  REGION_FROM_CHECK="${4}"
+  COLOR_CODE="$OK"
+
+  # Check if color is different than normal (pass)
+  if [ "${CHECK_RESULT}" == 'INFO' ]
+  then
+      COLOR_CODE="${NOTICE}"
+  elif [ "${CHECK_RESULT}" == 'FAIL' ]
+  then
+      COLOR_CODE="${BAD}"
+  elif [ "${CHECK_RESULT}" == 'WARNING' ]
+  then
+      COLOR_CODE="${WARNING}"
+  fi
+  # Check if region is passed
+  if [ -z "${REGION_FROM_CHECK}" ]
+  then
+      REGION_FROM_CHECK=$REGION
+  fi
+  CSV_LINE="${PROFILE//,/--}${SEP}${ACCOUNT_NUM//,/--}${SEP}${REGION_FROM_CHECK//,/--}${SEP}${TITLE_ID//,/--}${SEP}${CHECK_RESULT//,/--}${SEP}${ITEM_SCORED//,/--}${SEP}${ITEM_CIS_LEVEL//,/--}${SEP}${TITLE_TEXT//,/--}${SEP}${CHECK_RESULT_EXTENDED//,/--}${SEP}${CHECK_ASFF_COMPLIANCE_TYPE//,/--}${SEP}${CHECK_SEVERITY//,/--}${SEP}${CHECK_SERVICENAME//,/--}${SEP}${CHECK_ASFF_RESOURCE_TYPE//,/--}${SEP}${CHECK_ASFF_TYPE//,/--}${SEP}${CHECK_RISK//,/--}${SEP}${CHECK_REMEDIATION//,/--}${SEP}${CHECK_DOC//,/--}${SEP}${CHECK_CAF_EPIC//,/--}${SEP}${CHECK_RESOURCE_ID//,/--}${SEP}${PROWLER_START_TIME//,/--}${SEP}${ACCOUNT_DETAILS_EMAIL//,/--}${SEP}${ACCOUNT_DETAILS_NAME//,/--}${SEP}${ACCOUNT_DETAILS_ARN//,/--}${SEP}${ACCOUNT_DETAILS_ORG//,/--}${SEP}${ACCOUNT_DETAILS_TAGS//,/--}"
+  # Iterating over input modes
+  OIFS="${IFS}"
+  IFS=','
+  for MODE_TYPE in ${MODE}
+  do
+    IFS="${OIFS}"
+    if  [ "${MODE_TYPE}" == 'html' ]
+    then
+        generateHtmlOutput "${CHECK_RESULT_EXTENDED}" "${CHECK_RESULT}"
+    elif [ "${MODE_TYPE}" == 'csv' ]
+    then
+        echo "${CSV_LINE}" >> "${OUTPUT_FILE_NAME}"."${EXTENSION_CSV}"
+    elif [ "${MODE_TYPE}" == 'json' ]
+    then
+        generateJsonOutput "${CHECK_RESULT_EXTENDED}" "${CHECK_RESULT}" "$CHECK_RESOURCE_ID" >> "${OUTPUT_FILE_NAME}"."${EXTENSION_JSON}"
+    elif [ "${MODE_TYPE}" == 'json-asff' ]
+    then
+        JSON_ASFF_OUTPUT=$(generateJsonAsffOutput "${CHECK_RESULT_EXTENDED}" "${CHECK_RESULT}" "$CHECK_RESOURCE_ID")
+        echo "${JSON_ASFF_OUTPUT}" >> "${OUTPUT_FILE_NAME}"."${EXTENSION_ASFF}"
+        if [[ "${SEND_TO_SECURITY_HUB}" -eq 1 ]]; then
+            sendToSecurityHub "${JSON_ASFF_OUTPUT}" "${REGION_FROM_CHECK}"
+        fi
+    elif [[ "${MODE_TYPE}" == "junit-xml" ]]
+    then
+        if [ "${CHECK_RESULT}" == 'PASS' ]
+        then
+            output_junit_success "${CHECK_RESULT_EXTENDED}"
+        elif [ "${CHECK_RESULT}" == 'INFO' ]
+        then
+            output_junit_info "${CHECK_RESULT_EXTENDED}"
+        elif [ "${CHECK_RESULT}" == 'FAIL' ]
+        then
+            output_junit_failure "${CHECK_RESULT_EXTENDED}"
+        elif [ "${CHECK_RESULT}" == 'WARNING' ]
+        then
+            output_junit_skipped "${CHECK_RESULT_EXTENDED}"
+        fi
+    elif [ "${MODE_TYPE}" == 'mono' ]
+    then
+       echo  "      $COLOR_CODE ${CHECK_RESULT}! $NORMAL ${CHECK_RESULT_EXTENDED}">> "${OUTPUT_FILE_NAME}"."${EXTENSION_TEXT}"
+    fi
+  done
+
+  # Print in screen
+  echo "      $COLOR_CODE ${CHECK_RESULT}!$NORMAL ${CHECK_RESULT_EXTENDED}"
+
+  #checking database provider
+  if [[ ${DATABASE_PROVIDER} == 'postgresql' ]]
+  then
+        END_STRIPPED_TITLE_TEXT=${TITLE_TEXT%%\]*}
+        CHECK_ID="${END_STRIPPED_TITLE_TEXT##\[}"
+        stripPostgresFields
+        DB_SEP="','"
+        POSTGRES_LINE="'${AUDIT_ID//,/--}${DB_SEP}${PROFILE//,/--}${DB_SEP}${ACCOUNT_NUM//,/--}${DB_SEP}${REGION_FROM_CHECK//,/--}${DB_SEP}${CHECK_ID//,/--}${DB_SEP}${CHECK_RESULT//,/--}${DB_SEP}${ITEM_SCORED//,/--}${DB_SEP}${ITEM_CIS_LEVEL//,/--}${DB_SEP}${TITLE_TEXT//,/--}${DB_SEP}${CHECK_RESULT_EXTENDED//,/--}${DB_SEP}${CHECK_ASFF_COMPLIANCE_TYPE//,/--}${DB_SEP}${CHECK_SEVERITY//,/--}${DB_SEP}${CHECK_SERVICENAME//,/--}${DB_SEP}${CHECK_ASFF_RESOURCE_TYPE//,/--}${DB_SEP}${CHECK_ASFF_TYPE//,/--}${DB_SEP}${CHECK_RISK//,/--}${DB_SEP}${CHECK_REMEDIATION//,/--}${DB_SEP}${CHECK_DOC//,/--}${DB_SEP}${CHECK_CAF_EPIC//,/--}${DB_SEP}${CHECK_RESOURCE_ID//,/--}${DB_SEP}${ACCOUNT_DETAILS_EMAIL//,/--}${DB_SEP}${ACCOUNT_DETAILS_NAME//,/--}${DB_SEP}${ACCOUNT_DETAILS_ARN//,/--}${DB_SEP}${ACCOUNT_DETAILS_ORG//,/--}${DB_SEP}${ACCOUNT_DETAILS_TAGS//,/--}${DB_SEP}${PROWLER_START_TIME//,/--}'"
+        postgresql_connector "${POSTGRES_LINE}"
+  fi
+}
+
+stripPostgresFields(){
+  AUDIT_ID=${AUDIT_ID//\'/´}
+  PROFILE=${PROFILE//\'/´}
+  ACCOUNT_NUM=${ACCOUNT_NUM//\'/´}
+  REGION_FROM_CHECK=${REGION_FROM_CHECK//\'/´}
+  CHECK_ID=${CHECK_ID//\'/´}
+  CHECK_RESULT=${CHECK_RESULT//\'/´}
+  ITEM_SCORED=${ITEM_SCORED//\'/´}
+  ITEM_CIS_LEVEL=${ITEM_CIS_LEVEL//\'/´}
+  TITLE_TEXT=${TITLE_TEXT//\'/´}
+  CHECK_RESULT_EXTENDED=${CHECK_RESULT_EXTENDED//\'/´}
+  CHECK_ASFF_COMPLIANCE_TYPE=${CHECK_ASFF_COMPLIANCE_TYPE//\'/´}
+  CHECK_SEVERITY=${CHECK_SEVERITY//\'/´}
+  CHECK_SERVICENAME=${CHECK_SERVICENAME//\'/´}
+  CHECK_ASFF_RESOURCE_TYPE=${CHECK_ASFF_RESOURCE_TYPE//\'/´}
+  CHECK_ASFF_TYPE=${CHECK_ASFF_TYPE//\'/´}
+  CHECK_RISK=${CHECK_RISK//\'/´}
+  CHECK_REMEDIATION=${CHECK_REMEDIATION//\'/´}
+  CHECK_DOC=${CHECK_DOC//\'/´}
+  CHECK_CAF_EPIC=${CHECK_CAF_EPIC//\'/´}
+  ACCOUNT_DETAILS_EMAIL=${ACCOUNT_DETAILS_EMAIL//\'/´}
+  ACCOUNT_DETAILS_NAME=${ACCOUNT_DETAILS_NAME//\'/´}
+  ACCOUNT_DETAILS_ARN=${ACCOUNT_DETAILS_ARN//\'/´}
+  ACCOUNT_DETAILS_ORG=${ACCOUNT_DETAILS_ORG//\'/´}
+  ACCOUNT_DETAILS_TAGS=${ACCOUNT_DETAILS_TAGS//\'/´}
+  PROWLER_START_TIME=${PROWLER_START_TIME//\'/´}
+}
+
+textPass(){
+  CHECK_RESULT="PASS"
+  CHECK_RESULT_EXTENDED="${1}"
+  CHECK_RESOURCE_ID="${3}"
+  CHECK_REGION="${2}"
+
+  PASS_COUNTER=$((PASS_COUNTER+1))
+
+  if is_quiet "${QUIET}"
+  then
+    return
+  fi
+
+  general_output "${CHECK_RESULT}" "${CHECK_RESULT_EXTENDED}" "${CHECK_RESOURCE_ID}" "${CHECK_REGION}"
+}
+
+textInfo(){
+  CHECK_RESULT="INFO"
+  CHECK_RESULT_EXTENDED="${1}"
+  CHECK_RESOURCE_ID="${3}"
+  CHECK_REGION="${2}"
+
+  if is_quiet "${QUIET}"
+  then
+    return
+  fi
+
+  general_output "${CHECK_RESULT}" "${CHECK_RESULT_EXTENDED}" "${CHECK_RESOURCE_ID}" "${CHECK_REGION}"
+}
+
+textFail(){
+
+  CHECK_RESULT='FAIL'
+  CHECK_RESULT_EXTENDED="${1}"
+  CHECK_RESOURCE_ID="${3}"
+  CHECK_REGION="${2}"
+
+  FAIL_COUNTER=$((FAIL_COUNTER+1))
+
+  # Check if resources are whitelisted
+  CHECK_RESULT=$(allowlist_check "${CHECK_RESULT_EXTENDED}")
+
+  # only set non-0 exit code on FAIL mode, WARN is ok
+  if [[ "${CHECK_RESULT}" == "FAIL" ]]
+  then
+    set_exitcode
+  fi
+
+  general_output "${CHECK_RESULT}" "${CHECK_RESULT_EXTENDED}" "${CHECK_RESOURCE_ID}" "${CHECK_REGION}"
+}
+
+textTitle(){
+
+  TITLE_ID="${1}"
+  TITLE_TEXT="${2}"
+  CHECK_ASFF_COMP_TYPE="${6}"
+
+  CHECKS_COUNTER=$((CHECKS_COUNTER+1))
+
+  if [[ $NUMERAL ]]; then
+    # Left-pad the check ID with zeros to simplify sorting, e.g. 1.1 -> 1.01
+    TITLE_ID=$(awk -F'.' '{ printf "%d.%02d", $1, $2 }' <<< "$TITLE_ID")
+  fi
+
+  local CHECK_SERVICENAME="$MAGENTA$3$NORMAL"
+  local CHECK_SEVERITY="$BROWN[$4]$NORMAL"
+
+  case "${CHECK_ASFF_COMP_TYPE}" in
+    LEVEL1)  ITEM_CIS_LEVEL="CIS Level 1";;
+    LEVEL2)  ITEM_CIS_LEVEL="CIS Level 2";;
+    EXTRA)   ITEM_CIS_LEVEL="Extra";;
+    SUPPORT) ITEM_CIS_LEVEL="Support";;
+    *)       ITEM_CIS_LEVEL="Unspecified or Invalid";;
+  esac
+
+  echo -e "$TITLE_ID $TITLE_TEXT - $CHECK_SERVICENAME $CHECK_SEVERITY"
+}
+
+generateJsonOutput(){
+  local message=$1
+  local status=$2
+  local resource_id=$3
+  jq -M -c \
+  --arg PROFILE "$PROFILE" \
+  --arg ACCOUNT_NUM "$ACCOUNT_NUM" \
+  --arg TITLE_TEXT "$TITLE_TEXT" \
+  --arg MESSAGE "$(echo -e "${message}" | sed -e 's/^[[:space:]]*//')" \
+  --arg STATUS "$status" \
+  --arg SEVERITY "$(echo $CHECK_SEVERITY | sed 's/[][]//g')" \
+  --arg SCORED "$ITEM_SCORED" \
+  --arg ITEM_CIS_LEVEL "$ITEM_CIS_LEVEL" \
+  --arg TITLE_ID "$TITLE_ID" \
+  --arg REGION_FROM_CHECK "$REGION_FROM_CHECK" \
+  --arg TYPE "$CHECK_ASFF_COMPLIANCE_TYPE" \
+  --arg TIMESTAMP "$(get_iso8601_timestamp)" \
+  --arg SERVICENAME "$CHECK_SERVICENAME" \
+  --arg CHECK_CAF_EPIC "$CHECK_CAF_EPIC" \
+  --arg CHECK_RISK "$CHECK_RISK" \
+  --arg CHECK_REMEDIATION "$CHECK_REMEDIATION" \
+  --arg CHECK_DOC "$CHECK_DOC" \
+  --arg CHECK_RESOURCE_ID "$resource_id" \
+  --arg ACCOUNT_DETAILS_EMAIL "$ACCOUNT_DETAILS_EMAIL" \
+  --arg ACCOUNT_DETAILS_NAME "$ACCOUNT_DETAILS_NAME" \
+  --arg ACCOUNT_DETAILS_ARN "$ACCOUNT_DETAILS_ARN" \
+  --arg ACCOUNT_DETAILS_ORG "$ACCOUNT_DETAILS_ORG" \
+  --arg ACCOUNT_DETAILS_TAGS "$ACCOUNT_DETAILS_TAGS" \
+  -n '{
+    "Profile": $PROFILE,
+    "Account Number": $ACCOUNT_NUM,
+    "Control": $TITLE_TEXT,
+    "Message": $MESSAGE,
+    "Severity": $SEVERITY,
+    "Status": $STATUS,
+    "Scored": $SCORED,
+    "Level": $ITEM_CIS_LEVEL,
+    "Control ID": $TITLE_ID,
+    "Region": $REGION_FROM_CHECK,
+    "Timestamp": $TIMESTAMP,
+    "Compliance": $TYPE,
+    "Service": $SERVICENAME,
+    "CAF Epic": $CHECK_CAF_EPIC,
+    "Risk": $CHECK_RISK,
+    "Remediation": $CHECK_REMEDIATION,
+    "Doc link": $CHECK_DOC,
+    "Resource ID": $CHECK_RESOURCE_ID,
+    "Account Email": $ACCOUNT_DETAILS_EMAIL,
+    "Account Name": $ACCOUNT_DETAILS_NAME,
+    "Account ARN": $ACCOUNT_DETAILS_ARN,
+    "Account Organization": $ACCOUNT_DETAILS_ORG,
+    "Account tags": $ACCOUNT_DETAILS_TAGS
+  }'
+}
+
+generateJsonAsffOutput(){
+  # UNIQUE_ID must only contain characters from the unreserved characters set defined in section 2.3 of RFC-3986
+  # Replace any successive non-conforming characters with a single underscore
+  local message=$1
+  local status=$2
+
+  #Checks to determine if the rule passes in a resource name that prowler uses to track the AWS Resource for allowlisting purposes
+  if [[ -z $3 ]]; then
+    local resource_id="NONE_PROVIDED"
+  else
+    local resource_id=$3
+  fi
+
+  if [[ "$status" == "FAIL" ]]; then
+    status="FAILED"
+  elif [[ "$status" == "PASS" ]]; then
+    status="PASSED"
+  fi
+  jq -M -c \
+  --arg ACCOUNT_NUM "$ACCOUNT_NUM" \
+  --arg TITLE_TEXT "$CHECK_SERVICENAME.$TITLE_TEXT" \
+  --arg MESSAGE "$(echo -e "${message}")" \
+  --arg UNIQUE_ID "$(LC_ALL=C echo -e -n "${message}" | tr -cs '[:alnum:]._~-' '_')" \
+  --arg STATUS "$status" \
+  --arg SEVERITY "$(echo $CHECK_SEVERITY| awk '{ print toupper($0) }' |  sed 's/[][]//g')" \
+  --arg TITLE_ID "$TITLE_ID" \
+  --arg CHECK_ID "$CHECK_ID" \
+  --arg TYPE "$CHECK_ASFF_COMPLIANCE_TYPE" \
+  --arg COMPLIANCE_RELATED_REQUIREMENTS "$CHECK_ASFF_COMPLIANCE_TYPE" \
+  --arg RESOURCE_TYPE "$CHECK_ASFF_RESOURCE_TYPE" \
+  --arg REGION_FROM_CHECK "$REGION_FROM_CHECK" \
+  --arg TIMESTAMP "$(get_iso8601_timestamp)" \
+  --arg PROWLER_VERSION "$PROWLER_VERSION" \
+  --arg AWS_PARTITION "$AWS_PARTITION" \
+  --arg CHECK_RESOURCE_ID "$resource_id" \
+  -n '{
+      "SchemaVersion": "2018-10-08",
+      "Id": "prowler-\($TITLE_ID)-\($ACCOUNT_NUM)-\($REGION_FROM_CHECK)-\($UNIQUE_ID)",
+      "ProductArn": "arn:\($AWS_PARTITION):securityhub:\($REGION_FROM_CHECK)::product/prowler/prowler",
+      "RecordState": "ACTIVE",
+      "ProductFields": {
+          "ProviderName": "Prowler",
+          "ProviderVersion": $PROWLER_VERSION,
+          "ProwlerResourceName": $CHECK_RESOURCE_ID
+      },
+      "GeneratorId": "prowler-\($CHECK_ID)",
+      "AwsAccountId": $ACCOUNT_NUM,
+      "Types": [
+          $TYPE
+      ],
+      "FirstObservedAt": $TIMESTAMP,
+      "UpdatedAt": $TIMESTAMP,
+      "CreatedAt": $TIMESTAMP,
+      "Severity": {
+          "Label": $SEVERITY
+      },
+      "Title": $TITLE_TEXT,
+      "Description": $MESSAGE,
+      "Resources": [
+          {
+              "Type": $RESOURCE_TYPE,
+              "Id": $CHECK_RESOURCE_ID,
+              "Partition": $AWS_PARTITION,
+              "Region": $REGION_FROM_CHECK
+          }
+      ],
+      "Compliance": {
+          "Status": $STATUS,
+          "RelatedRequirements": [ $COMPLIANCE_RELATED_REQUIREMENTS ]
+      }
+
+  }'
+}
+
+generateHtmlOutput(){
+  local message=$1
+  local status=$2
+
+  if [[ $status == "INFO" ]];then
+    local ROW_CLASS='table-info'
+  fi
+  if [[ $status == "PASS" ]];then
+    local ROW_CLASS='p-3 mb-2 bg-success-custom'
+  fi
+  if [[ $status == "FAIL" ]];then
+    local ROW_CLASS='table-danger'
+  fi
+  if [[ $status == "WARN" ]];then
+    local ROW_CLASS='table-warning'
+  fi
+
+  local CHECK_SEVERITY="$(echo $CHECK_SEVERITY | sed 's/[][]//g')"
+
+  echo '<tr class="'$ROW_CLASS'">' >> ${OUTPUT_FILE_NAME}.$EXTENSION_HTML
+  echo '  <td>'$status'</td>' >> ${OUTPUT_FILE_NAME}.$EXTENSION_HTML
+  echo '  <td>'$CHECK_SEVERITY'</td>' >> ${OUTPUT_FILE_NAME}.$EXTENSION_HTML
+  echo '  <td>'$ACCOUNT_NUM'</td>' >> ${OUTPUT_FILE_NAME}.$EXTENSION_HTML
+  echo '  <td>'$REGION_FROM_CHECK'</td>' >> ${OUTPUT_FILE_NAME}.$EXTENSION_HTML
+  echo '  <td>'$CHECK_ASFF_COMPLIANCE_TYPE'</td>' >> ${OUTPUT_FILE_NAME}.$EXTENSION_HTML
+  echo '  <td>'$CHECK_SERVICENAME'</td>' >> ${OUTPUT_FILE_NAME}.$EXTENSION_HTML
+  echo '  <td>'$TITLE_ID'</td>' >> ${OUTPUT_FILE_NAME}.$EXTENSION_HTML
+  echo '  <td>'$TITLE_TEXT'</td>' >> ${OUTPUT_FILE_NAME}.$EXTENSION_HTML
+  echo '  <td>'$message'</td>' >> ${OUTPUT_FILE_NAME}.$EXTENSION_HTML
+  echo '  <td>'$ITEM_CIS_LEVEL'</td>' >> ${OUTPUT_FILE_NAME}.$EXTENSION_HTML
+  echo '  <td>'$CHECK_CAF_EPIC'</td>' >> ${OUTPUT_FILE_NAME}.$EXTENSION_HTML
+  echo '  <td><p class="show-read-more">'$CHECK_RISK'</p></td>' >> ${OUTPUT_FILE_NAME}.$EXTENSION_HTML
+  echo '  <td><p class="show-read-more">'$CHECK_REMEDIATION'</p></td>' >> ${OUTPUT_FILE_NAME}.$EXTENSION_HTML
+  echo '  <td><a class="read-more" href="'$CHECK_DOC'"><i class="fas fa-external-link-alt"></i></a></td>' >> ${OUTPUT_FILE_NAME}.$EXTENSION_HTML
+  echo '  <td>'$CHECK_RESOURCE_ID'</td>' >> ${OUTPUT_FILE_NAME}.$EXTENSION_HTML
+  echo '</tr>' >> ${OUTPUT_FILE_NAME}.$EXTENSION_HTML
+  echo '' >> ${OUTPUT_FILE_NAME}.$EXTENSION_HTML
+}

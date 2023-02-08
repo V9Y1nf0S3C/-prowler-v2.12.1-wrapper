@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+
+# Prowler - the handy cloud security tool (copyright 2018) by Toni de la Fuente
+#
+# Licensed under the Apache License, Version 2.0 (the "License"); you may not
+# use this file except in compliance with the License. You may obtain a copy
+# of the License at http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software distributed
+# under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
+# CONDITIONS OF ANY KIND, either express or implied. See the License for the
+# specific language governing permissions and limitations under the License.
+CHECK_ID_extra712="7.12"
+CHECK_TITLE_extra712="[extra712] Check if Amazon Macie is enabled"
+CHECK_SCORED_extra712="NOT_SCORED"
+CHECK_CIS_LEVEL_extra712="EXTRA"
+CHECK_SEVERITY_extra712="Low"
+CHECK_ALTERNATE_check712="extra712"
+CHECK_ASFF_RESOURCE_TYPE_extra712="AwsMacieSession"
+CHECK_SERVICENAME_extra712="macie"
+CHECK_RISK_extra712='Amazon Macie is a fully managed data security and data privacy service that uses machine learning and pattern matching to help you discover; monitor; and protect your sensitive data in AWS.'
+CHECK_REMEDIATION_extra712='Enable Amazon Macie and create appropriate jobs to discover sensitive data.'
+CHECK_DOC_extra712='https://docs.aws.amazon.com/macie/latest/user/getting-started.html'
+CHECK_CAF_EPIC_extra712='Data Protection'
+
+ extra712(){
+      # Macie supports get-macie-session which tells the current status, if not Disabled.
+      #  Capturing the STDOUT can help determine when Disabled.
+     for region in $REGIONS; do
+          MACIE_STATUS=$($AWSCLI macie2 get-macie-session ${PROFILE_OPT} --region "$region" --query status --output text 2>&1)
+          if [[ "$MACIE_STATUS" == "ENABLED" ]]; then
+               textPass "$region: Macie is enabled." "$region"
+
+          elif [[ "$MACIE_STATUS" == "PAUSED" ]]; then
+               textFail "$region: Macie is currently in a SUSPENDED state." "$region"
+
+          elif grep -q -E 'Macie is not enabled' <<< "${MACIE_STATUS}"; then
+               textFail "$region: Macie is not enabled." "$region"
+
+          elif grep -q -E 'AccessDenied|UnauthorizedOperation|AuthorizationError' <<< "${MACIE_STATUS}"; then
+               textInfo "$region: Access Denied trying to get AWS Macie information." "$region"
+          fi
+     done
+     }
