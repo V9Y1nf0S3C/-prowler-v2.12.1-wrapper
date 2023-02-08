@@ -1,3 +1,50 @@
+# Prowler Wrapper for v2.12.1 (won't work for v3.x)
+This repo contains the wrapper for prowler commands.
+
+Prowler credit goes to https://github.com/prowler-cloud/prowler and the wrapper credits goes to me :wink:
+
+
+## Q&A
+#### 1.What is the use of prowler wrapper?
+**Ans:** If you want to log the aws cli commands the prowler making and their result to be stored in a file for your analysis.
+
+#### 2.Where can I see the commands and the results from aws?
+**Ans:** ./prowler_wrapper_output.txt
+
+#### 3.How wrapper works?
+**Ans:** Prowler <----> wrapper.sh <----> aws cli <----> Internet
+
+#### 4.What kind of output I will get using this wrapper?
+**Sample Prowler output**
+<kbd>![Steps](docs/images/wrapper-1.png)</kbd>
+
+**Sample Wrapper output**
+<kbd>![Steps](docs/images/wrapper-2.png)</kbd>
+
+
+#### 5.Do i need to use any additional command to use wrapper?
+**Ans:** No need. You need to use the same prowler v2.* command.
+
+#### 6.How can I use the cli colorful output for future reference.
+**Ans:** This _tee_ tool can be used for this.
+
+To generate the output file: ```<prowler_command_with_arguments_here> | tee -a prowler_out.txt ```
+
+To view the output in linux: ```cat prowler_out.txt```
+
+To view the output in windows: ```type prowler_out.txt```
+
+
+#### 7.What are the files changed/added from prowler v2.12.1 official version?
+**Ans:** 
+```
+./wrapper.sh
+./prowler
+./include/awscli_detector
+```
+
+
+# Official info from the prowler provided below
 <p align="center">
   <img align="center" src="docs/images/prowler-pro-dark.png#gh-dark-mode-only" width="150" height="36">
   <img align="center" src="docs/images/prowler-pro-light.png#gh-light-mode-only" width="15%" height="15%">
