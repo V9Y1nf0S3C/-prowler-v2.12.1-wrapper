@@ -3,16 +3,61 @@ This repo contains the wrapper for prowler commands.
 
 Prowler credit goes to https://github.com/prowler-cloud/prowler and the wrapper credits goes to me :wink:
 
+## Usage
+
+Download & configure prowler+wrapper
+```
+git clone https://github.com/V9Y1nf0S3C/prowler-v2.12.1-wrapper.git
+cd prowler-v2.12.1-wrapper
+chmod +x prowler wrapper.sh
+mkdir output
+```
+Configure AWS CLI. You can follow any authentication method as described [here](https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-quickstart.html#cli-configure-quickstart-precedence)
+
+  ```sh
+  aws configure --profile profile_name
+  
+  ----- or -----
+  
+  export AWS_ACCESS_KEY_ID="ASXXXXXXX"
+  export AWS_SECRET_ACCESS_KEY="XXXXXXXXX"
+  export AWS_SESSION_TOKEN="XXXXXXXXX"
+  ```
+  
+Run prowler (sample command provided here):
+```
+./prowler -p <profile_here> -r ap-southeast-1 -f ap-southeast-1 -M html,csv -o ./output/ | tee -a ./output/prowler_output.txt
+```
+
+Check the wrapper output (use another terminal or tab)
+```sh
+tail -f ./prowler_wrapper_output.txt
+```
+
+Check the prowler output (after prowler command execution completed):
+
+```
+cat ./output/prowler_output.txt
+```
+
+Check the wrapper output:
+```
+cat ./prowler_wrapper_output.txt
+```
 
 ## Q&A
+
 #### 1.What is the use of prowler wrapper?
 **Ans:** If you want to log the aws cli commands the prowler making and their result to be stored in a file for your analysis.
+
 
 #### 2.Where can I see the commands and the results from aws?
 **Ans:** ./prowler_wrapper_output.txt
 
+
 #### 3.How wrapper works?
 **Ans:** Prowler <----> wrapper.sh <----> aws cli <----> Internet
+
 
 #### 4.What kind of output I will get using this wrapper?
 **Sample Prowler output**
@@ -24,6 +69,7 @@ Prowler credit goes to https://github.com/prowler-cloud/prowler and the wrapper 
 
 #### 5.Do i need to use any additional command to use wrapper?
 **Ans:** No need. You need to use the same prowler v2.* command.
+
 
 #### 6.How can I use the cli colorful output for future reference.
 **Ans:** This _tee_ tool can be used for this.
